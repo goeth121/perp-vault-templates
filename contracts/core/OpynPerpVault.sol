@@ -13,6 +13,13 @@ import { IAction } from '../interfaces/IAction.sol';
 import { ICurve } from '../interfaces/ICurve.sol';
 import { IStakeDao } from '../interfaces/IStakeDao.sol';
 
+// TODO: to optimize gas
+// 1) Use buffer
+// - Deposit function only put on vault and curve deposit could be done daily basis by bot
+// - Withdraw function only put on vault and curve withdraw could be done daily basis by bot
+// - If withdrawal amount is pretty big, use own gas
+// 2) Update solidity version and not use SafeMath
+
 /**
  * Error Codes
  * O1: actions for the vault have not been initialized
@@ -72,6 +79,12 @@ contract OpynPerpVault is ERC20, ReentrancyGuard, Ownable {
 
   /// @dev withdrawal fee percentage. 50 being 0.5%
   uint256 public withdrawalFeePercentage = 50;
+
+  /// @dev buffer percentage to keep on the contract for instant and short gas withdrawal. 200 being 2%
+  uint256 public targetBufferPercentage = 200;
+
+  /// @dev total amount of ETH deposited via the contract, this is adjusted up on deposit and withdraw
+  uint256 public totalETHDeposit = 0;
 
   /// @dev how many percentage should be reserved in vault for withdraw. 1000 being 10%
   uint256 public withdrawReserve = 0;
@@ -188,6 +201,26 @@ contract OpynPerpVault is ERC20, ReentrancyGuard, Ownable {
   }
 
   /**
+   * @dev change buffer percentage based on current percentage and target percentage.
+   * TODO: need better function name
+   */
+  function resetBuffer(uint256 minEcrv) external {
+    uint256 contractBalance = address(this).balance;
+    uint256 currentPercentage = contractBalance * 10000 / totalETHDeposit;
+    if (currentPercentage > targetBufferPercentage) { // deposit into curve
+      uint256 depositAmount = contractBalance * (currentPercentage - targetBufferPercentage) / 10000;
+      uint256[2] memory amounts;
+      amounts[0] = msg.value;
+      amounts[1] = 0; // not depositing any seth
+
+      // deposit ETH to curvePool
+      curvePool.add_liquidity{value:msg.value}(amounts, minEcrv);
+    } else if (targetBufferPercentage > currentPercentage) { // withdraw from curve
+
+    }
+  }
+
+  /**
    * @notice Deposits ETH into the contract and mint vault shares. 
    * @dev deposit into the curvePool, then into stakedao, then mint the shares to depositor, and emit the deposit event
    * @param minEcrv minimum amount of ecrv to get out from adding liquidity. 
@@ -197,6 +230,10 @@ contract OpynPerpVault is ERC20, ReentrancyGuard, Ownable {
     actionsInitialized();
     require(msg.value > 0, 'O6');
 
+    // add ETH deposit amount
+    totalETHDeposit += msg.value;
+
+    // TODO: remove curve deposit part here
     // the sdecrv is already deposited into the contract at this point, need to substract it from total
     uint256[2] memory amounts;
     amounts[0] = msg.value;
@@ -242,6 +279,13 @@ contract OpynPerpVault is ERC20, ReentrancyGuard, Ownable {
 
     _burn(msg.sender, _share);
 
+    // TODO: check if remaining ETH is below target
+    // Then burn share token and send the amount to the withdrawer
+    // If remaining ETH is above target, then withdraw from curve for TargetBufferPercent + WithdrawAmount - CurrentBalance
+    // Send ETH to the withdrawer
+    // If the calculation of target ETH balance to withdraw is complex, only implement delay mechanism on deposit operation
+    // It would be much simpler for this PR :) - targetBufferPercentage could be removed in that case
+
     // withdraw from stakedao and curvePool
     IStakeDao sdecrv = IStakeDao(sdecrvAddress);
     sdecrv.withdraw(sdecrvToWithdraw);
@@ -259,6 +303,9 @@ contract OpynPerpVault is ERC20, ReentrancyGuard, Ownable {
     // send ETH to user
     (bool success2, ) = msg.sender.call{ value: ethOwedToUser }('');
     require(success2, 'O10');
+
+    // reduce ETH deposit amount
+    totalETHDeposit -= ethOwedToUser;
 
     emit Withdraw(msg.sender, ethOwedToUser, fee, _share);
   }
